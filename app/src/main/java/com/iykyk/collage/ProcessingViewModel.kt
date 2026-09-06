@@ -9,6 +9,8 @@ import com.iykyk.collage.domain.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import java.util.concurrent.atomic.AtomicInteger
 
 sealed class ProcessingState {
@@ -35,6 +37,9 @@ class ProcessingViewModel(application: Application) : AndroidViewModel(applicati
     private var trackingThreshold = 0.6f
     private var identityThreshold = 0.5f
 
+    // Limit concurrent AI tasks to prevent memory pressure and thread contention
+    private val aiSemaphore = Semaphore(4)
+
     fun reset() {
         _state.value = ProcessingState.Idle
     }
@@ -44,8 +49,8 @@ class ProcessingViewModel(application: Application) : AndroidViewModel(applicati
         _state.value = ProcessingState.Idle
         viewModelScope.launch {
             try {
-                // 1. Extract frames (6fps back for accuracy, now parallelized)
-                val frames = frameExtractor.extractFrames(videoUri, samplesPerSecond = 6) { progress ->
+                // 1. Extract frames (4fps is usually enough if we have accurate detection)
+                val frames = frameExtractor.extractFrames(videoUri, samplesPerSecond = 4) { progress ->
                     _state.value = ProcessingState.ExtractingFrames(progress)
                 }
                 android.util.Log.d("ProcessingViewModel", "Extracted ${frames.size} frames")
@@ -54,34 +59,34 @@ class ProcessingViewModel(application: Application) : AndroidViewModel(applicati
                     return@launch
                 }
 
-                // 2. Detect + embed every frame in PARALLEL
+                // 2. Detect + embed every frame in PARALLEL with limited concurrency
                 val perFrameObservations = withContext(Dispatchers.Default) {
                     val progressCount = AtomicInteger(0)
                     val deferredResults = frames.map { frame ->
                         async {
-                            val rawFaces = faceDetector.detect(frame)
-                            val observations = rawFaces.map { raw ->
-                                // Pre-processing (cropping) happens in parallel
-                                // Inference is synchronized to prevent interpreter conflicts
-                                val embedding = synchronized(faceEmbedder) {
-                                    faceEmbedder.embed(raw.sourceFrame, raw.bbox)
+                            aiSemaphore.withPermit {
+                                val rawFaces = faceDetector.detect(frame)
+                                val observations = rawFaces.map { raw ->
+                                    val embedding = synchronized(faceEmbedder) {
+                                        faceEmbedder.embed(raw.sourceFrame, raw.bbox)
+                                    }
+                                    FaceObservation(
+                                        timestampMs = raw.timestampMs,
+                                        bbox = raw.bbox,
+                                        embedding = embedding,
+                                        headEulerAngleY = raw.headEulerAngleY,
+                                        headEulerAngleZ = raw.headEulerAngleZ,
+                                        leftEyeOpenProb = raw.leftEyeOpenProb,
+                                        rightEyeOpenProb = raw.rightEyeOpenProb,
+                                        smilingProb = raw.smilingProb,
+                                        sharpness = ShotScorer.computeSharpness(raw.sourceFrame, raw.bbox),
+                                        sourceFrame = raw.sourceFrame
+                                    )
                                 }
-                                FaceObservation(
-                                    timestampMs = raw.timestampMs,
-                                    bbox = raw.bbox,
-                                    embedding = embedding,
-                                    headEulerAngleY = raw.headEulerAngleY,
-                                    headEulerAngleZ = raw.headEulerAngleZ,
-                                    leftEyeOpenProb = raw.leftEyeOpenProb,
-                                    rightEyeOpenProb = raw.rightEyeOpenProb,
-                                    smilingProb = raw.smilingProb,
-                                    sharpness = ShotScorer.computeSharpness(raw.sourceFrame, raw.bbox),
-                                    sourceFrame = raw.sourceFrame
-                                )
+                                val current = progressCount.incrementAndGet()
+                                _state.value = ProcessingState.DetectingFaces(current.toFloat() / frames.size)
+                                observations
                             }
-                            val current = progressCount.incrementAndGet()
-                            _state.value = ProcessingState.DetectingFaces(current.toFloat() / frames.size)
-                            observations
                         }
                     }
                     deferredResults.awaitAll()

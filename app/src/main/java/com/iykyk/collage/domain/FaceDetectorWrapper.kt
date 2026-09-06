@@ -27,18 +27,34 @@ class FaceDetectorWrapper {
         .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
         .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
         .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_NONE)
-        .setMinFaceSize(0.1f)
+        .setMinFaceSize(0.1f) // 0.1 is the default and allows finding smaller faces
         .enableTracking()
         .build()
 
     private val detector = FaceDetection.getClient(options)
 
     /**
-      * Runs detection on a single frame. Blocking-style via Tasks.await, called from
-     * Dispatchers.Default -- never call this from the main thread.
+      * Runs detection on a single frame.
      */
     suspend fun detect(frame: SampledFrame): List<RawFaceDetection> = withContext(Dispatchers.Default) {
-        val image = InputImage.fromBitmap(frame.bitmap, 0)
+        // Optimization: Resize large bitmaps before passing to ML Kit.
+        // ML Kit performs its own internal scaling, but passing a smaller bitmap reduces memory 
+        // pressure and some overhead. 480px-720px is usually enough for accurate detection.
+        val targetWidth = 480
+        val scale = if (frame.bitmap.width > targetWidth) targetWidth.toFloat() / frame.bitmap.width else 1.0f
+        
+        val detectionBitmap = if (scale < 1.0f) {
+            Bitmap.createScaledBitmap(
+                frame.bitmap,
+                (frame.bitmap.width * scale).toInt(),
+                (frame.bitmap.height * scale).toInt(),
+                true
+            )
+        } else {
+            frame.bitmap
+        }
+
+        val image = InputImage.fromBitmap(detectionBitmap, 0)
         val faces = try {
             Tasks.await(detector.process(image))
         } catch (e: Exception) {
@@ -51,9 +67,21 @@ class FaceDetectorWrapper {
         }
 
         faces.map { face ->
+            // Map bounding box back to original coordinates if we scaled
+            val originalBbox = if (scale < 1.0f) {
+                Rect(
+                    (face.boundingBox.left / scale).toInt(),
+                    (face.boundingBox.top / scale).toInt(),
+                    (face.boundingBox.right / scale).toInt(),
+                    (face.boundingBox.bottom / scale).toInt()
+                )
+            } else {
+                face.boundingBox
+            }
+
             RawFaceDetection(
                 timestampMs = frame.timestampMs,
-                bbox = face.boundingBox,
+                bbox = originalBbox,
                 headEulerAngleY = face.headEulerAngleY,
                 headEulerAngleZ = face.headEulerAngleZ,
                 leftEyeOpenProb = face.leftEyeOpenProbability,
