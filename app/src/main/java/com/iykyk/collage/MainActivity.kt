@@ -11,12 +11,15 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import java.io.File
@@ -28,6 +31,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        android.util.Log.d("MainActivity", "onCreate with ViewModel: $viewModel")
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
@@ -40,12 +44,13 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun ProcessingScreen(viewModel: ProcessingViewModel) {
-    val context = LocalContext.current
     val state by viewModel.state.collectAsState()
+    val context = LocalContext.current
 
     val pickVideoLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
+        android.util.Log.d("MainActivity", "Video picked: $uri")
         uri?.let { viewModel.processVideo(it) }
     }
 
@@ -60,25 +65,32 @@ fun ProcessingScreen(viewModel: ProcessingViewModel) {
             is ProcessingState.Idle -> {
                 Text("Pick a portrait video to build a collage", style = MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(16.dp))
-                Button(onClick = { pickVideoLauncher.launch("video/*") }) {
-                    Text("Choose video")
+                
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(200.dp)
+                        .background(androidx.compose.ui.graphics.Color.Blue)
+                        .pointerInput(Unit) {
+                            detectTapGestures {
+                                android.util.Log.d("MainActivity", "Blue box tapped")
+                                pickVideoLauncher.launch("video/*")
+                            }
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("TAP TO CHOOSE VIDEO", color = androidx.compose.ui.graphics.Color.White)
                 }
             }
 
-            is ProcessingState.ExtractingFrames -> {
-                Text("Reading video…")
-                Spacer(Modifier.height(8.dp))
-                LinearProgressIndicator(progress = { s.progress }, modifier = Modifier.fillMaxWidth())
-            }
-
-            is ProcessingState.DetectingFaces -> {
-                Text("Detecting faces…")
+            is ProcessingState.ReadingVideo -> {
+                Text("Analyzing video…")
                 Spacer(Modifier.height(8.dp))
                 LinearProgressIndicator(progress = { s.progress }, modifier = Modifier.fillMaxWidth())
             }
 
             is ProcessingState.ClusteringIdentities -> {
-                Text("Grouping appearances by person…")
+                Text("Grouping appearances…")
                 Spacer(Modifier.height(8.dp))
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             }
@@ -113,7 +125,7 @@ fun ProcessingScreen(viewModel: ProcessingViewModel) {
             }
 
             is ProcessingState.Error -> {
-                Text("Something went wrong: ${s.message}", color = MaterialTheme.colorScheme.error)
+                Text("Error: ${s.message}", color = MaterialTheme.colorScheme.error)
                 Spacer(Modifier.height(16.dp))
                 Button(onClick = { viewModel.reset() }) {
                     Text("Try again")

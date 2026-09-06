@@ -14,7 +14,7 @@ data class FaceObservation(
     val rightEyeOpenProb: Float?,
     val smilingProb: Float?,
     val sharpness: Float,
-    val sourceFrame: Bitmap
+    val faceCrop: Bitmap // Stored crop for the final collage, NOT the full frame (save memory!)
 )
 
 /** A continuous visible segment of one person, per the assignment's appearance definition. */
@@ -23,15 +23,28 @@ data class Appearance(
     val endMs: Long,
     val observations: List<FaceObservation>
 ) {
-    /** Mean embedding across the appearance -- more stable than any single frame. */
+    /**
+     * Mean embedding across the sharpest observations -- much more stable and accurate than 
+     * using every single frame or just the first seen.
+     */
     fun representativeEmbedding(): FloatArray {
-        val dim = observations.first().embedding.size
+        if (observations.isEmpty()) return floatArrayOf()
+        
+        // Take top 5 sharpest observations to form a high-quality signature
+        val bestObs = observations.sortedByDescending { it.sharpness }.take(5)
+        
+        val dim = bestObs.first().embedding.size
         val avg = FloatArray(dim)
-        for (obs in observations) {
+        for (obs in bestObs) {
             for (i in 0 until dim) avg[i] += obs.embedding[i]
         }
-        for (i in 0 until dim) avg[i] /= observations.size
-        return avg
+        for (i in 0 until dim) avg[i] /= bestObs.size
+        
+        // Re-normalize to ensure the average vector is still on the hypersphere
+        var norm = 0f
+        for (v in avg) norm += v * v
+        norm = kotlin.math.sqrt(norm).coerceAtLeast(1e-6f)
+        return FloatArray(dim) { avg[it] / norm }
     }
 }
 

@@ -20,18 +20,25 @@ class FrameExtractor(private val context: Context) {
 
     /**
      * Extracts frames in parallel using multiple retriever instances.
-     * Dramatically faster than sequential extraction while maintaining frame accuracy.
+     * Uses OPTION_CLOSEST for accurate (non-duplicate) frames.
      */
-    suspend fun extractFrames(
+    suspend fun <T> processFramesParallel(
         videoUri: Uri,
-        samplesPerSecond: Int = 6,
-        onProgress: (Float) -> Unit = {}
-    ): List<SampledFrame> = withContext(Dispatchers.IO) {
-        val mainRetriever = MediaMetadataRetriever()
-        mainRetriever.setDataSource(context, videoUri)
-        val durationMs = mainRetriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-        val rotation = mainRetriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
-        mainRetriever.release()
+        samplesPerSecond: Int = 2,
+        onProgress: (Float) -> Unit = {},
+        processor: suspend (SampledFrame) -> T
+    ): List<T> = withContext(Dispatchers.IO) {
+        val metaRetriever = MediaMetadataRetriever()
+        try {
+            metaRetriever.setDataSource(context, videoUri)
+        } catch (e: Exception) {
+            android.util.Log.e("FrameExtractor", "Failed to set data source: ${e.message}", e)
+            return@withContext emptyList()
+        }
+        
+        val durationMs = metaRetriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+        val rotation = metaRetriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+        metaRetriever.release()
 
         if (durationMs <= 0) return@withContext emptyList()
 
@@ -46,32 +53,39 @@ class FrameExtractor(private val context: Context) {
         val totalFrames = timestamps.size
         val processedCount = AtomicInteger(0)
         
-        // Use 4 parallel workers for extraction
-        val numWorkers = 4
+        // Use 3 parallel workers (staying safe with memory)
+        val numWorkers = 3
         val chunkSize = (totalFrames + numWorkers - 1) / numWorkers
 
-        val allFrames = timestamps.chunked(chunkSize).map { chunk ->
+        val results = timestamps.chunked(chunkSize).map { chunk ->
             async {
-                val retriever = MediaMetadataRetriever()
-                retriever.setDataSource(context, videoUri)
-                val frames = chunk.map { time ->
-                    val rawBmp = retriever.getFrameAtTime(time * 1000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                    val processedBmp = rawBmp?.let {
-                        if (rotation != 0) {
+                val workerRetriever = MediaMetadataRetriever()
+                workerRetriever.setDataSource(context, videoUri)
+                val chunkResults = chunk.map { timeMs ->
+                    // OPTION_CLOSEST is essential for seeing different people across time
+                    val rawBmp = workerRetriever.getFrameAtTime(timeMs * 1000, MediaMetadataRetriever.OPTION_CLOSEST)
+                    val result = if (rawBmp != null) {
+                        val processedBmp = if (rotation != 0) {
                             val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
-                            Bitmap.createBitmap(it, 0, 0, it.width, it.height, matrix, true)
-                        } else it
-                    }
+                            val rotated = Bitmap.createBitmap(rawBmp, 0, 0, rawBmp.width, rawBmp.height, matrix, true)
+                            rawBmp.recycle()
+                            rotated
+                        } else rawBmp
+                        
+                        val frameResult = processor(SampledFrame(timeMs, processedBmp))
+                        processedBmp.recycle()
+                        frameResult
+                    } else null
+                    
                     val current = processedCount.incrementAndGet()
                     onProgress(current.toFloat() / totalFrames)
-                    
-                    if (processedBmp != null) SampledFrame(time, processedBmp) else null
+                    result
                 }.filterNotNull()
-                retriever.release()
-                frames
+                workerRetriever.release()
+                chunkResults
             }
-        }.awaitAll().flatten().sortedBy { it.timestampMs }
+        }.awaitAll().flatten()
 
-        allFrames
+        results
     }
 }

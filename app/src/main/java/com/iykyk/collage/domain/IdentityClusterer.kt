@@ -22,6 +22,8 @@ class IdentityClusterer(
     )
 
     fun cluster(appearances: List<Appearance>): List<PersonIdentity> {
+        android.util.Log.i("IdentityClusterer", "Clustering ${appearances.size} appearances with threshold $similarityThreshold")
+        
         if (BuildConfig.DEBUG) {
             logPairwiseSimilarities(appearances)
         }
@@ -31,14 +33,15 @@ class IdentityClusterer(
         val clusters = mutableListOf<Cluster>()
 
         // 1. Initial greedy forward-pass
-        for (appearance in appearances) {
+        for ((idx, appearance) in appearances.withIndex()) {
             val embedding = appearance.representativeEmbedding()
 
             var bestCluster: Cluster? = null
             var bestSim = similarityThreshold
 
-            for (cluster in clusters) {
+            for ((cIdx, cluster) in clusters.withIndex()) {
                 val sim = FaceEmbedder.cosineSimilarity(cluster.centroid, embedding)
+                android.util.Log.v("IdentityClusterer", "App[$idx] vs Cluster[$cIdx]: sim=${"%.4f".format(sim)}")
                 if (sim > bestSim) {
                     bestSim = sim
                     bestCluster = cluster
@@ -48,35 +51,12 @@ class IdentityClusterer(
             if (bestCluster != null) {
                 bestCluster.appearances.add(appearance)
                 bestCluster.centroid = calculateCentroid(bestCluster.appearances)
+                android.util.Log.d("IdentityClusterer", "App[$idx] -> Cluster matched (sim=${"%.3f".format(bestSim)}). Cluster size: ${bestCluster.appearances.size}")
             } else {
                 clusters.add(Cluster(embedding.copyOf(), mutableListOf(appearance)))
+                android.util.Log.d("IdentityClusterer", "App[$idx] -> New Cluster created. Total clusters: ${clusters.size}")
             }
         }
-
-        // 2. Second-pass: iterative merging
-        val mergeThreshold = similarityThreshold - 0.05f
-        var mergedThisPass: Boolean
-        do {
-            mergedThisPass = false
-            var i = 0
-            while (i < clusters.size) {
-                var j = i + 1
-                while (j < clusters.size) {
-                    val sim = FaceEmbedder.cosineSimilarity(clusters[i].centroid, clusters[j].centroid)
-                    if (sim > mergeThreshold) {
-                        // Merge j into i
-                        clusters[i].appearances.addAll(clusters[j].appearances)
-                        clusters[i].centroid = calculateCentroid(clusters[i].appearances)
-                        clusters.removeAt(j)
-                        mergedThisPass = true
-                        // Don't increment j, check the new element at this index
-                    } else {
-                        j++
-                    }
-                }
-                i++
-            }
-        } while (mergedThisPass)
 
         return clusters.map { cluster ->
             val allObservations = cluster.appearances.flatMap { it.observations }
@@ -111,7 +91,7 @@ class IdentityClusterer(
             for (j in i + 1 until appearances.size) {
                 val ej = appearances[j].representativeEmbedding()
                 val sim = FaceEmbedder.cosineSimilarity(ei, ej)
-                Log.d("SimDebug", "App[$i] vs App[$j]: %.4f".format(sim))
+                Log.d("SimDebug", "App[$i] (len=${appearances[i].observations.size}) vs App[$j] (len=${appearances[j].observations.size}): %.4f".format(sim))
             }
         }
     }

@@ -9,6 +9,8 @@ import com.google.mlkit.vision.face.FaceDetectorOptions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
+import kotlin.math.max
+
 /** One face detected in one sampled frame, before embedding/tracking. */
 data class RawFaceDetection(
     val timestampMs: Long,
@@ -24,10 +26,10 @@ data class RawFaceDetection(
 class FaceDetectorWrapper {
 
     private val options = FaceDetectorOptions.Builder()
-        .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
+        .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
         .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
         .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_NONE)
-        .setMinFaceSize(0.15f)
+        .setMinFaceSize(0.015f) // Much more permissive to catch people in background
         .build()
 
     private val detector = FaceDetection.getClient(options)
@@ -36,10 +38,12 @@ class FaceDetectorWrapper {
       * Runs detection on a single frame.
      */
     suspend fun detect(frame: SampledFrame): List<RawFaceDetection> = withContext(Dispatchers.Default) {
-        // Fast path: Scale down for detection. 
-        // ML Kit performs best when faces are ~100-200 pixels.
-        val targetSize = 480
-        val scale = if (frame.bitmap.width > targetSize) targetSize.toFloat() / frame.bitmap.width else 1.0f
+        // First Principle: Detection doesn't need 4K resolution.
+        // Scaling to ~720p maintains enough detail for faces while being much faster.
+        val targetDim = 720
+        val scale = if (max(frame.bitmap.width, frame.bitmap.height) > targetDim) {
+            targetDim.toFloat() / max(frame.bitmap.width, frame.bitmap.height)
+        } else 1.0f
         
         val detectionBitmap = if (scale < 1.0f) {
             Bitmap.createScaledBitmap(
@@ -53,11 +57,19 @@ class FaceDetectorWrapper {
         }
 
         val image = InputImage.fromBitmap(detectionBitmap, 0)
+        
         val faces = try {
             Tasks.await(detector.process(image))
         } catch (e: Exception) {
             android.util.Log.e("FaceDetectorWrapper", "ML Kit Error: ${e.message}", e)
             emptyList()
+        }
+        
+        android.util.Log.d("FaceDetectorWrapper", "Detected ${faces.size} faces at ${frame.timestampMs}ms (scaled by ${"%.2f".format(scale)})")
+
+        faces.forEach { face ->
+            val b = face.boundingBox
+            android.util.Log.v("FaceDetectorWrapper", "Face: [${b.width()}x${b.height()}] at (${b.centerX()},${b.centerY()})")
         }
 
         faces.map { face ->

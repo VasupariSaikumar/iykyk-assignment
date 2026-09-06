@@ -21,9 +21,9 @@ import kotlin.math.min
  * single real appearance into several).
  */
 class AppearanceTracker(
-    private val similarityThreshold: Float = 0.6f,
-    private val maxCenterDistanceFraction: Float = 0.35f, // fraction of frame diagonal
-    private val maxGapFrames: Int = 3
+    private val similarityThreshold: Float = 0.70f,
+    private val maxCenterDistanceFraction: Float = 0.20f, // balanced
+    private val maxGapFrames: Int = 2
 ) {
 
     private class Track(
@@ -44,6 +44,7 @@ class AppearanceTracker(
         val finishedAppearances = mutableListOf<Appearance>()
 
         framesInOrder.forEachIndexed { frameIndex, facesInFrame ->
+            android.util.Log.d("AppearanceTracker", "Frame $frameIndex: ${facesInFrame.size} faces detected")
             val unmatchedTracks = activeTracks.toMutableList()
             val usedTracks = mutableSetOf<Track>()
 
@@ -56,12 +57,14 @@ class AppearanceTracker(
                 for (track in unmatchedTracks) {
                     if (track in usedTracks) continue
                     val centerDist = centerDistance(track.lastBbox, face.bbox)
-                    if (centerDist > maxCenterDist) continue // too far to plausibly be the same continuous appearance
-
+                    
                     val sim = FaceEmbedder.cosineSimilarity(
                         track.observations.last().embedding, face.embedding
                     )
-                    if (sim > bestScore) {
+                    
+                    android.util.Log.v("AppearanceTracker", "Compare: Track at ${track.lastBbox.centerX()},${track.lastBbox.centerY()} vs Face at ${face.bbox.centerX()},${face.bbox.centerY()}. Dist: ${"%.1f".format(centerDist)} (max: ${"%.1f".format(maxCenterDist)}), Sim: ${"%.3f".format(sim)} (min: $similarityThreshold)")
+
+                    if (centerDist <= maxCenterDist && sim > bestScore) {
                         bestScore = sim
                         bestTrack = track
                     }
@@ -72,8 +75,11 @@ class AppearanceTracker(
                     bestTrack.lastBbox = face.bbox
                     bestTrack.lastSeenFrameIndex = frameIndex
                     usedTracks.add(bestTrack)
+                    android.util.Log.d("AppearanceTracker", "Matched face to track. New size: ${bestTrack.observations.size}")
                 } else {
-                    activeTracks.add(Track(face.bbox, frameIndex, mutableListOf(face)))
+                    val newTrack = Track(face.bbox, frameIndex, mutableListOf(face))
+                    activeTracks.add(newTrack)
+                    android.util.Log.d("AppearanceTracker", "Created NEW track at ${face.bbox.centerX()},${face.bbox.centerY()}")
                 }
             }
 
@@ -81,6 +87,7 @@ class AppearanceTracker(
             val stillActive = mutableListOf<Track>()
             for (track in activeTracks) {
                 if (frameIndex - track.lastSeenFrameIndex > maxGapFrames) {
+                    android.util.Log.d("AppearanceTracker", "Closing track after gap. Observations: ${track.observations.size}")
                     finishedAppearances.add(
                         Appearance(
                             startMs = track.observations.first().timestampMs,

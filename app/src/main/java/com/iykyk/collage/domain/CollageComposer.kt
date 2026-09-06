@@ -17,7 +17,7 @@ object CollageComposer {
      * looks like a low-res mugshot. Expanding by ~80% on each side while staying in-bounds
      * gives a "shoulders up" portrait look instead.
      */
-    private fun generousCrop(source: Bitmap, bbox: Rect): Bitmap {
+    fun generousCrop(source: Bitmap, bbox: Rect): Bitmap {
         val expandX = (bbox.width() * 0.8f).toInt()
         val expandY = (bbox.height() * 0.9f).toInt() // extra headroom above/below
         val left = max(0, bbox.left - expandX)
@@ -36,7 +36,9 @@ object CollageComposer {
         val sqSide = min(side, min(source.width - sqLeft, source.height - sqTop)).coerceAtLeast(1)
 
         val cropped = Bitmap.createBitmap(source, sqLeft, sqTop, sqSide, sqSide)
-        return Bitmap.createScaledBitmap(cropped, TILE_SIZE, TILE_SIZE, true)
+        val scaled = Bitmap.createScaledBitmap(cropped, TILE_SIZE, TILE_SIZE, true)
+        if (cropped != source) cropped.recycle() // Clean up intermediate crop
+        return scaled
     }
 
     private fun roundedTile(bitmap: Bitmap): Bitmap {
@@ -78,8 +80,7 @@ object CollageComposer {
             val x = PADDING + col * (TILE_SIZE + PADDING)
             val y = PADDING + row * (TILE_SIZE + 56 + PADDING)
 
-            val crop = generousCrop(identity.bestShot.sourceFrame, identity.bestShot.bbox)
-            val rounded = roundedTile(crop)
+            val rounded = roundedTile(identity.bestShot.faceCrop)
             canvas.drawBitmap(rounded, x.toFloat(), y.toFloat(), null)
 
             canvas.drawText(

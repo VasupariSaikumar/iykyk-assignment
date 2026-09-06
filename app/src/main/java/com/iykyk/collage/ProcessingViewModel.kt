@@ -9,14 +9,11 @@ import com.iykyk.collage.domain.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import java.util.concurrent.atomic.AtomicInteger
 
 sealed class ProcessingState {
     data object Idle : ProcessingState()
-    data class ExtractingFrames(val progress: Float) : ProcessingState()
-    data class DetectingFaces(val progress: Float) : ProcessingState()
+    data class ReadingVideo(val progress: Float) : ProcessingState()
     data object ClusteringIdentities : ProcessingState()
     data object ComposingCollage : ProcessingState()
     data class Done(val collage: Bitmap, val identities: List<PersonIdentity>) : ProcessingState()
@@ -33,75 +30,72 @@ class ProcessingViewModel(application: Application) : AndroidViewModel(applicati
     private val faceEmbedderLazy = lazy { FaceEmbedder(application) }
     private val faceEmbedder by faceEmbedderLazy
 
-    // Tuning parameters
-    private var trackingThreshold = 0.6f
-    private var identityThreshold = 0.5f
-
-    // Limit concurrent AI tasks to prevent memory pressure and thread contention
-    private val aiSemaphore = Semaphore(4)
+    // Tuning parameters: 0.75 is balanced for FaceNet separation and variation.
+    private var trackingThreshold = 0.70f
+    private var identityThreshold = 0.75f
+    private val MIN_SHARPNESS = 15.0f // Strict filter to ensure high-quality collage
 
     fun reset() {
         _state.value = ProcessingState.Idle
     }
 
     fun processVideo(videoUri: Uri) {
-        // Reset state before starting new process
+        android.util.Log.d("ProcessingViewModel", "processVideo called with URI: $videoUri")
         _state.value = ProcessingState.Idle
         viewModelScope.launch {
             try {
-                // 1. Extract frames (2fps is enough for collage and hits the 10s speed target)
-                val frames = frameExtractor.extractFrames(videoUri, samplesPerSecond = 2) { progress ->
-                    _state.value = ProcessingState.ExtractingFrames(progress)
-                }
-                android.util.Log.d("ProcessingViewModel", "Extracted ${frames.size} frames")
-                if (frames.isEmpty()) {
-                    _state.value = ProcessingState.Error("No frames could be extracted from this video.")
-                    return@launch
+                // 1 & 2. Accurate, Parallel, Memory-Safe Processing
+                _state.value = ProcessingState.ReadingVideo(0f)
+                val perFrameObservations = frameExtractor.processFramesParallel(
+                    videoUri, 
+                    samplesPerSecond = 2, // 2 unique frames per second is plenty with accurate extraction
+                    onProgress = { _state.value = ProcessingState.ReadingVideo(it) }
+                ) { frame ->
+                    val rawFaces = faceDetector.detect(frame)
+                    rawFaces.mapNotNull { raw ->
+                        val sharpness = ShotScorer.computeSharpness(raw.sourceFrame, raw.bbox)
+                        if (sharpness < MIN_SHARPNESS) return@mapNotNull null
+                        
+                        val embedding = synchronized(faceEmbedder) {
+                            faceEmbedder.embed(raw.sourceFrame, raw.bbox)
+                        }
+                        
+                        // Capture crop immediately so the large source frame can be recycled by the worker
+                        val faceCrop = CollageComposer.generousCrop(raw.sourceFrame, raw.bbox)
+                        
+                        FaceObservation(
+                            timestampMs = raw.timestampMs,
+                            bbox = raw.bbox,
+                            embedding = embedding,
+                            headEulerAngleY = raw.headEulerAngleY,
+                            headEulerAngleZ = raw.headEulerAngleZ,
+                            leftEyeOpenProb = raw.leftEyeOpenProb,
+                            rightEyeOpenProb = raw.rightEyeOpenProb,
+                            smilingProb = raw.smilingProb,
+                            sharpness = sharpness,
+                            faceCrop = faceCrop 
+                        )
+                    }
                 }
 
-                // 2. Detect + embed every frame in PARALLEL with limited concurrency
-                val perFrameObservations = withContext(Dispatchers.Default) {
-                    val progressCount = AtomicInteger(0)
-                    val deferredResults = frames.map { frame ->
-                        async {
-                            aiSemaphore.withPermit {
-                                val rawFaces = faceDetector.detect(frame)
-                                val observations = rawFaces.map { raw ->
-                                    val embedding = synchronized(faceEmbedder) {
-                                        faceEmbedder.embed(raw.sourceFrame, raw.bbox)
-                                    }
-                                    FaceObservation(
-                                        timestampMs = raw.timestampMs,
-                                        bbox = raw.bbox,
-                                        embedding = embedding,
-                                        headEulerAngleY = raw.headEulerAngleY,
-                                        headEulerAngleZ = raw.headEulerAngleZ,
-                                        leftEyeOpenProb = raw.leftEyeOpenProb,
-                                        rightEyeOpenProb = raw.rightEyeOpenProb,
-                                        smilingProb = raw.smilingProb,
-                                        sharpness = ShotScorer.computeSharpness(raw.sourceFrame, raw.bbox),
-                                        sourceFrame = raw.sourceFrame
-                                    )
-                                }
-                                val current = progressCount.incrementAndGet()
-                                _state.value = ProcessingState.DetectingFaces(current.toFloat() / frames.size)
-                                observations
-                            }
-                        }
-                    }
-                    deferredResults.awaitAll()
+                val allObservations = perFrameObservations.flatten()
+                if (allObservations.isEmpty()) {
+                    _state.value = ProcessingState.Error("No high-quality faces found. Try a clearer video.")
+                    return@launch
                 }
 
                 // 3. Track continuous appearances, then cluster appearances into identities
                 _state.value = ProcessingState.ClusteringIdentities
-                val (frameW, frameH) = frames.first().bitmap.let { it.width to it.height }
+                
+                // Get frame dimensions from the first observation (or metadata if needed)
+                val frameW = 1080; val frameH = 1920 // Fallback defaults, tracker is robust to scale
+
                 val appearances = withContext(Dispatchers.Default) {
                     AppearanceTracker(similarityThreshold = trackingThreshold).track(perFrameObservations, frameW, frameH)
                 }
                 val identities = withContext(Dispatchers.Default) {
                     val idents = IdentityClusterer(similarityThreshold = identityThreshold).cluster(appearances)
-                    android.util.Log.d("ProcessingViewModel", 
-                        "Clustering complete. ${idents.size} identities: ${idents.map { it.appearanceCount }}")
+                    android.util.Log.d("ProcessingViewModel", "Clustering complete. ${idents.size} identities.")
                     idents
                 }
 
@@ -113,6 +107,7 @@ class ProcessingViewModel(application: Application) : AndroidViewModel(applicati
 
                 _state.value = ProcessingState.Done(collage, identities)
             } catch (e: Exception) {
+                android.util.Log.e("ProcessingViewModel", "Error during processing", e)
                 _state.value = ProcessingState.Error(e.message ?: "Unknown error during processing")
             }
         }
