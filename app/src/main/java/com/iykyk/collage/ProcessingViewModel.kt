@@ -45,8 +45,8 @@ class ProcessingViewModel(application: Application) : AndroidViewModel(applicati
         _state.value = ProcessingState.Idle
         viewModelScope.launch {
             try {
-                // 1. Extract frames (off main thread -- FrameExtractor already dispatches internally)
-                val frames = frameExtractor.extractFrames(videoUri) { progress ->
+                // 1. Extract frames (at 4fps instead of 6 for speed)
+                val frames = frameExtractor.extractFrames(videoUri, samplesPerSecond = 4) { progress ->
                     _state.value = ProcessingState.ExtractingFrames(progress)
                 }
                 android.util.Log.d("ProcessingViewModel", "Extracted ${frames.size} frames")

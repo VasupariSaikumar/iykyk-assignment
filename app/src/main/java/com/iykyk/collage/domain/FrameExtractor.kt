@@ -52,10 +52,9 @@ class FrameExtractor(private val context: Context) {
             var step = 0L
 
             while (t < durationMs) {
-                // OPTION_CLOSEST is slower than OPTION_CLOSEST_SYNC but gives the actual
-                // frame at time t rather than snapping to the nearest keyframe -- matters
-                // for accurate appearance timing.
-                val rawBmp = retriever.getFrameAtTime(t * 1000, MediaMetadataRetriever.OPTION_CLOSEST)
+                // OPTION_CLOSEST_SYNC is significantly faster as it snaps to the nearest keyframe.
+                // For a collage, this slight time-shift is a worthy trade-off for speed.
+                val rawBmp = retriever.getFrameAtTime(t * 1000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
                 if (rawBmp != null) {
                     val bmp = if (rotation != 0) {
                         val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
