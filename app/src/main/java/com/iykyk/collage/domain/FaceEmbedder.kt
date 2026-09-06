@@ -52,7 +52,7 @@ class FaceEmbedder(context: Context, modelAssetName: String = "facenet.tflite") 
     fun embed(sourceFrame: Bitmap, bbox: Rect): FloatArray {
         val face = tightCrop(sourceFrame, bbox)
         val inputBuffer = bitmapToByteBuffer(face)
-        // Match the model's output shape: [1, 128]
+        // Match the model's output shape: [1, 512]
         val output = FloatArray(embeddingSize)
         interpreter.run(inputBuffer, arrayOf(output))
         return l2Normalize(output)
