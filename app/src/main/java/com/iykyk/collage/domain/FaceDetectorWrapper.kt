@@ -24,10 +24,11 @@ data class RawFaceDetection(
 class FaceDetectorWrapper {
 
     private val options = FaceDetectorOptions.Builder()
-        .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
+        .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
         .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
         .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_NONE)
-        .setMinFaceSize(0.15f)
+        .setMinFaceSize(0.1f)
+        .enableTracking()
         .build()
 
     private val detector = FaceDetection.getClient(options)

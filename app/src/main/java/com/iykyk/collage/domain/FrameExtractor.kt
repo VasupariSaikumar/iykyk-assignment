@@ -6,72 +6,72 @@ import android.graphics.Matrix
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicInteger
 
-/**
- * A single sampled frame from the source video.
- * timestampMs is kept because appearance-counting is defined in terms of continuous
- * *time* segments, not frame indices.
- */
 data class SampledFrame(
     val timestampMs: Long,
     val bitmap: Bitmap
 )
 
-/**
- * Pulls frames from the video at a fixed rate.
- *
- * Rate tradeoff: 30s clip @ 6fps = 180 frames. That's plenty of temporal resolution to
- * catch "continuous visible segments" per the assignment's appearance definition, while
- * staying cheap enough to run face detection + embedding on every frame on a mid-range phone
- * within a reasonable processing time. Drop to 4fps first if perf becomes an issue -- do NOT
- * drop resolution, since representative-shot quality (sharpness/frontality) depends on it.
- */
 class FrameExtractor(private val context: Context) {
 
+    /**
+     * Extracts frames in parallel using multiple retriever instances.
+     * Dramatically faster than sequential extraction while maintaining frame accuracy.
+     */
     suspend fun extractFrames(
         videoUri: Uri,
         samplesPerSecond: Int = 6,
         onProgress: (Float) -> Unit = {}
-    ): List<SampledFrame> = withContext(Dispatchers.Default) {
-        val retriever = MediaMetadataRetriever()
-        val frames = mutableListOf<SampledFrame>()
+    ): List<SampledFrame> = withContext(Dispatchers.IO) {
+        val mainRetriever = MediaMetadataRetriever()
+        mainRetriever.setDataSource(context, videoUri)
+        val durationMs = mainRetriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+        val rotation = mainRetriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+        mainRetriever.release()
 
-        try {
-            retriever.setDataSource(context, videoUri)
+        if (durationMs <= 0) return@withContext emptyList()
 
-            val rotation = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
-                ?.toIntOrNull() ?: 0
-
-            val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
-                ?.toLongOrNull() ?: 0L
-
-            val stepMs = (1000L / samplesPerSecond).coerceAtLeast(1L)
-            var t = 0L
-            val totalSteps = (durationMs / stepMs).coerceAtLeast(1L)
-            var step = 0L
-
-            while (t < durationMs) {
-                // OPTION_CLOSEST_SYNC is significantly faster as it snaps to the nearest keyframe.
-                // For a collage, this slight time-shift is a worthy trade-off for speed.
-                val rawBmp = retriever.getFrameAtTime(t * 1000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                if (rawBmp != null) {
-                    val bmp = if (rotation != 0) {
-                        val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
-                        Bitmap.createBitmap(rawBmp, 0, 0, rawBmp.width, rawBmp.height, matrix, true)
-                    } else {
-                        rawBmp
-                    }
-                    frames.add(SampledFrame(t, bmp))
-                }
-                t += stepMs
-                step++
-                onProgress((step.toFloat() / totalSteps).coerceIn(0f, 1f))
-            }
-        } finally {
-            retriever.release()
+        val stepMs = (1000L / samplesPerSecond).coerceAtLeast(1L)
+        val timestamps = mutableListOf<Long>()
+        var t = 0L
+        while (t < durationMs) {
+            timestamps.add(t)
+            t += stepMs
         }
 
-        frames
+        val totalFrames = timestamps.size
+        val processedCount = AtomicInteger(0)
+        
+        // Use 4 parallel workers for extraction
+        val numWorkers = 4
+        val chunkSize = (totalFrames + numWorkers - 1) / numWorkers
+
+        val allFrames = timestamps.chunked(chunkSize).map { chunk ->
+            async {
+                val retriever = MediaMetadataRetriever()
+                retriever.setDataSource(context, videoUri)
+                val frames = chunk.map { time ->
+                    val rawBmp = retriever.getFrameAtTime(time * 1000, MediaMetadataRetriever.OPTION_CLOSEST)
+                    val processedBmp = rawBmp?.let {
+                        if (rotation != 0) {
+                            val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
+                            Bitmap.createBitmap(it, 0, 0, it.width, it.height, matrix, true)
+                        } else it
+                    }
+                    val current = processedCount.incrementAndGet()
+                    onProgress(current.toFloat() / totalFrames)
+                    
+                    if (processedBmp != null) SampledFrame(time, processedBmp) else null
+                }.filterNotNull()
+                retriever.release()
+                frames
+            }
+        }.awaitAll().flatten().sortedBy { it.timestampMs }
+
+        allFrames
     }
 }

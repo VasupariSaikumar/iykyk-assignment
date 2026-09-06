@@ -6,11 +6,10 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.iykyk.collage.domain.*
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicInteger
 
 sealed class ProcessingState {
     data object Idle : ProcessingState()
@@ -45,8 +44,8 @@ class ProcessingViewModel(application: Application) : AndroidViewModel(applicati
         _state.value = ProcessingState.Idle
         viewModelScope.launch {
             try {
-                // 1. Extract frames (at 4fps instead of 6 for speed)
-                val frames = frameExtractor.extractFrames(videoUri, samplesPerSecond = 4) { progress ->
+                // 1. Extract frames (6fps back for accuracy, now parallelized)
+                val frames = frameExtractor.extractFrames(videoUri, samplesPerSecond = 6) { progress ->
                     _state.value = ProcessingState.ExtractingFrames(progress)
                 }
                 android.util.Log.d("ProcessingViewModel", "Extracted ${frames.size} frames")
@@ -55,39 +54,37 @@ class ProcessingViewModel(application: Application) : AndroidViewModel(applicati
                     return@launch
                 }
 
-                // 2. Detect + embed every frame
+                // 2. Detect + embed every frame in PARALLEL
                 val perFrameObservations = withContext(Dispatchers.Default) {
-                    var totalFaces = 0
-                    val results = frames.mapIndexed { index, frame ->
-                        _state.value = ProcessingState.DetectingFaces((index + 1f) / frames.size)
-                        val rawFaces = faceDetector.detect(frame)
-                        totalFaces += rawFaces.size
-                        rawFaces.map { raw ->
-                            FaceObservation(
-                                timestampMs = raw.timestampMs,
-                                bbox = raw.bbox,
-                                embedding = faceEmbedder.embed(raw.sourceFrame, raw.bbox),
-                                headEulerAngleY = raw.headEulerAngleY,
-                                headEulerAngleZ = raw.headEulerAngleZ,
-                                leftEyeOpenProb = raw.leftEyeOpenProb,
-                                rightEyeOpenProb = raw.rightEyeOpenProb,
-                                smilingProb = raw.smilingProb,
-                                sharpness = ShotScorer.computeSharpness(raw.sourceFrame, raw.bbox),
-                                sourceFrame = raw.sourceFrame
-                            )
+                    val progressCount = AtomicInteger(0)
+                    val deferredResults = frames.map { frame ->
+                        async {
+                            val rawFaces = faceDetector.detect(frame)
+                            val observations = rawFaces.map { raw ->
+                                // Pre-processing (cropping) happens in parallel
+                                // Inference is synchronized to prevent interpreter conflicts
+                                val embedding = synchronized(faceEmbedder) {
+                                    faceEmbedder.embed(raw.sourceFrame, raw.bbox)
+                                }
+                                FaceObservation(
+                                    timestampMs = raw.timestampMs,
+                                    bbox = raw.bbox,
+                                    embedding = embedding,
+                                    headEulerAngleY = raw.headEulerAngleY,
+                                    headEulerAngleZ = raw.headEulerAngleZ,
+                                    leftEyeOpenProb = raw.leftEyeOpenProb,
+                                    rightEyeOpenProb = raw.rightEyeOpenProb,
+                                    smilingProb = raw.smilingProb,
+                                    sharpness = ShotScorer.computeSharpness(raw.sourceFrame, raw.bbox),
+                                    sourceFrame = raw.sourceFrame
+                                )
+                            }
+                            val current = progressCount.incrementAndGet()
+                            _state.value = ProcessingState.DetectingFaces(current.toFloat() / frames.size)
+                            observations
                         }
                     }
-                    android.util.Log.d("ProcessingViewModel", "Total faces detected across all frames: $totalFaces")
-
-                    // Added debug logging
-                    android.util.Log.d("DetectDebug", "Total frames: ${frames.size}")
-                    results.forEachIndexed { i, faces ->
-                        if (faces.isNotEmpty()) {
-                            android.util.Log.d("DetectDebug", "frame $i (${frames[i].timestampMs}ms): ${faces.size} faces, sizes=${faces.map { it.bbox.width() }}")
-                        }
-                    }
-
-                    results
+                    deferredResults.awaitAll()
                 }
 
                 // 3. Track continuous appearances, then cluster appearances into identities
