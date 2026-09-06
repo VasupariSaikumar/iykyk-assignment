@@ -55,7 +55,7 @@ class FrameExtractor(private val context: Context) {
                 val retriever = MediaMetadataRetriever()
                 retriever.setDataSource(context, videoUri)
                 val frames = chunk.map { time ->
-                    val rawBmp = retriever.getFrameAtTime(time * 1000, MediaMetadataRetriever.OPTION_CLOSEST)
+                    val rawBmp = retriever.getFrameAtTime(time * 1000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
                     val processedBmp = rawBmp?.let {
                         if (rotation != 0) {
                             val matrix = Matrix().apply { postRotate(rotation.toFloat()) }

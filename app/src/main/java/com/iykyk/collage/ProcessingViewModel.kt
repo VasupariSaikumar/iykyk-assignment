@@ -49,8 +49,8 @@ class ProcessingViewModel(application: Application) : AndroidViewModel(applicati
         _state.value = ProcessingState.Idle
         viewModelScope.launch {
             try {
-                // 1. Extract frames (4fps is usually enough if we have accurate detection)
-                val frames = frameExtractor.extractFrames(videoUri, samplesPerSecond = 4) { progress ->
+                // 1. Extract frames (2fps is enough for collage and hits the 10s speed target)
+                val frames = frameExtractor.extractFrames(videoUri, samplesPerSecond = 2) { progress ->
                     _state.value = ProcessingState.ExtractingFrames(progress)
                 }
                 android.util.Log.d("ProcessingViewModel", "Extracted ${frames.size} frames")

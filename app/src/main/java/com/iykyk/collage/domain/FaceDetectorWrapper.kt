@@ -24,11 +24,10 @@ data class RawFaceDetection(
 class FaceDetectorWrapper {
 
     private val options = FaceDetectorOptions.Builder()
-        .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
+        .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
         .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
         .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_NONE)
-        .setMinFaceSize(0.1f) // 0.1 is the default and allows finding smaller faces
-        .enableTracking()
+        .setMinFaceSize(0.15f)
         .build()
 
     private val detector = FaceDetection.getClient(options)
@@ -37,11 +36,10 @@ class FaceDetectorWrapper {
       * Runs detection on a single frame.
      */
     suspend fun detect(frame: SampledFrame): List<RawFaceDetection> = withContext(Dispatchers.Default) {
-        // Optimization: Resize large bitmaps before passing to ML Kit.
-        // ML Kit performs its own internal scaling, but passing a smaller bitmap reduces memory 
-        // pressure and some overhead. 480px-720px is usually enough for accurate detection.
-        val targetWidth = 480
-        val scale = if (frame.bitmap.width > targetWidth) targetWidth.toFloat() / frame.bitmap.width else 1.0f
+        // Fast path: Scale down for detection. 
+        // ML Kit performs best when faces are ~100-200 pixels.
+        val targetSize = 480
+        val scale = if (frame.bitmap.width > targetSize) targetSize.toFloat() / frame.bitmap.width else 1.0f
         
         val detectionBitmap = if (scale < 1.0f) {
             Bitmap.createScaledBitmap(
@@ -62,13 +60,8 @@ class FaceDetectorWrapper {
             emptyList()
         }
 
-        if (faces.isNotEmpty()) {
-            android.util.Log.d("FaceDetectorWrapper", "Detected ${faces.size} faces at ${frame.timestampMs}ms")
-        }
-
         faces.map { face ->
-            // Map bounding box back to original coordinates if we scaled
-            val originalBbox = if (scale < 1.0f) {
+            val box = if (scale < 1.0f) {
                 Rect(
                     (face.boundingBox.left / scale).toInt(),
                     (face.boundingBox.top / scale).toInt(),
@@ -81,7 +74,7 @@ class FaceDetectorWrapper {
 
             RawFaceDetection(
                 timestampMs = frame.timestampMs,
-                bbox = originalBbox,
+                bbox = box,
                 headEulerAngleY = face.headEulerAngleY,
                 headEulerAngleZ = face.headEulerAngleZ,
                 leftEyeOpenProb = face.leftEyeOpenProbability,
